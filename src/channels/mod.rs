@@ -58,6 +58,7 @@ pub mod voice_call;
 pub mod voice_wake;
 pub mod wati;
 pub mod webhook;
+pub mod wechat;
 pub mod wecom;
 pub mod whatsapp;
 #[cfg(feature = "whatsapp-web")]
@@ -101,6 +102,7 @@ pub use voice_call::{VoiceCallChannel, VoiceCallConfig};
 pub use voice_wake::VoiceWakeChannel;
 pub use wati::WatiChannel;
 pub use webhook::WebhookChannel;
+pub use wechat::WeChatChannel;
 pub use wecom::WeComChannel;
 pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
@@ -630,6 +632,14 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
                [VIDEO:<path-or-url>], [VOICE:<path-or-url>]\n\
              - Voice supports .wav, .mp3, .silk formats only. Other audio formats use [DOCUMENT:]\n\
              - Keep normal text outside markers and never wrap markers in code fences.\n",
+        ),
+        "wechat" => Some(
+            "When responding on WeChat:\n\
+             - Be concise and direct\n\
+             - For media attachments use markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], \
+               [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], or [VOICE:<path-or-url>]\n\
+             - Keep normal text outside markers and never wrap markers in code fences.\n\
+             - Use absolute local paths when sending generated files whenever possible.\n",
         ),
         _ => None,
     }
@@ -4945,6 +4955,21 @@ fn collect_configured_channels(
                 wc.webhook_key.clone(),
                 wc.allowed_users.clone(),
             )),
+        });
+    }
+
+    if let Some(ref wechat) = config.channels_config.wechat {
+        channels.push(ConfiguredChannel {
+            display_name: "WeChat",
+            channel: Arc::new(
+                WeChatChannel::new(
+                    wechat.allowed_users.clone(),
+                    wechat.api_base_url.clone(),
+                    wechat.cdn_base_url.clone(),
+                    wechat.state_dir.as_ref().map(std::path::PathBuf::from),
+                )
+                .with_workspace_dir(config.workspace_dir.clone()),
+            ),
         });
     }
 
