@@ -16,6 +16,7 @@
 
 pub mod acp_server;
 pub mod bluesky;
+pub mod chatwoot;
 pub mod clawdtalk;
 pub mod cli;
 pub mod debounce;
@@ -67,6 +68,7 @@ pub mod whatsapp_storage;
 pub mod whatsapp_web;
 
 pub use bluesky::BlueskyChannel;
+pub use chatwoot::ChatwootChannel;
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
 pub use dingtalk::DingTalkChannel;
@@ -4799,6 +4801,16 @@ fn collect_configured_channels(
         channels.push(ConfiguredChannel {
             display_name: "WATI",
             channel: Arc::new(wati_channel),
+        });
+    }
+
+    if let Some(ref cw) = config.channels_config.chatwoot {
+        channels.push(ConfiguredChannel {
+            display_name: "Chatwoot",
+            channel: Arc::new(ChatwootChannel::new(
+                cw.base_url.clone(),
+                cw.bot_token.clone(),
+            )),
         });
     }
 

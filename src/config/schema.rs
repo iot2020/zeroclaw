@@ -6120,6 +6120,8 @@ pub struct ChannelsConfig {
     pub whatsapp: Option<WhatsAppConfig>,
     /// Linq Partner API channel configuration.
     pub linq: Option<LinqConfig>,
+    /// Chatwoot Agent Bot channel configuration.
+    pub chatwoot: Option<ChatwootConfig>,
     /// WATI WhatsApp Business API channel configuration.
     pub wati: Option<WatiConfig>,
     /// Nextcloud Talk bot channel configuration.
@@ -6237,6 +6239,10 @@ impl ChannelsConfig {
                 self.linq.is_some(),
             ),
             (
+                Box::new(ConfigWrapper::new(self.chatwoot.as_ref())),
+                self.chatwoot.is_some(),
+            ),
+            (
                 Box::new(ConfigWrapper::new(self.wati.as_ref())),
                 self.wati.is_some(),
             ),
@@ -6342,6 +6348,7 @@ impl Default for ChannelsConfig {
             signal: None,
             whatsapp: None,
             linq: None,
+            chatwoot: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -6903,6 +6910,49 @@ impl ChannelConfig for LinqConfig {
     }
     fn desc() -> &'static str {
         "iMessage/RCS/SMS via Linq API"
+    }
+}
+
+/// Chatwoot Agent Bot channel configuration.
+///
+/// Connects ZeroClaw as a Chatwoot Agent Bot. Chatwoot pushes customer
+/// messages via webhook; ZeroClaw replies through the Chatwoot API.
+///
+/// Setup: create an Agent Bot in Chatwoot with `outgoing_url` pointing to
+/// your ZeroClaw gateway `/chatwoot` endpoint and copy the bot token here.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChatwootConfig {
+    /// Chatwoot instance base URL (e.g. `https://chatwoot.example.com`).
+    pub base_url: String,
+    /// Agent Bot access token for authenticating API callbacks.
+    pub bot_token: String,
+    /// Shared HMAC secret for verifying inbound webhook signatures.
+    ///
+    /// Can also be set via `ZEROCLAW_CHATWOOT_WEBHOOK_SECRET`.
+    /// When set, incoming webhooks are verified using HMAC-SHA256.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+}
+
+impl std::fmt::Debug for ChatwootConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatwootConfig")
+            .field("base_url", &self.base_url)
+            .field("bot_token", &"[REDACTED]")
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl ChannelConfig for ChatwootConfig {
+    fn name() -> &'static str {
+        "Chatwoot"
+    }
+    fn desc() -> &'static str {
+        "customer support via Chatwoot Agent Bot"
     }
 }
 
@@ -11565,6 +11615,7 @@ auto_save = true
                 signal: None,
                 whatsapp: None,
                 linq: None,
+                chatwoot: None,
                 wati: None,
                 nextcloud_talk: None,
                 email: None,
@@ -12606,6 +12657,7 @@ allowed_users = ["@ops:matrix.org"]
             signal: None,
             whatsapp: None,
             linq: None,
+            chatwoot: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -12981,6 +13033,7 @@ channel_ids = ["C123", "D456"]
                 proxy_url: None,
             }),
             linq: None,
+            chatwoot: None,
             wati: None,
             nextcloud_talk: None,
             email: None,

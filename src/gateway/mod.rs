@@ -25,6 +25,7 @@ pub mod ws;
 use crate::channels::{
     Channel, GmailPushChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
     WhatsAppChannel, session_backend::SessionBackend, session_sqlite::SqliteSessionBackend,
+    ChatwootChannel,
 };
 use crate::config::Config;
 use crate::cost::CostTracker;
@@ -89,6 +90,10 @@ fn whatsapp_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String 
 
 fn linq_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
     format!("linq_{}_{}", msg.sender, msg.id)
+}
+
+fn chatwoot_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
+    format!("chatwoot_{}_{}", msg.sender, msg.id)
 }
 
 fn wati_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
@@ -343,6 +348,9 @@ pub struct AppState {
     pub nextcloud_talk: Option<Arc<NextcloudTalkChannel>>,
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
+    pub chatwoot: Option<Arc<ChatwootChannel>>,
+    /// Chatwoot webhook secret for HMAC signature verification
+    pub chatwoot_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
     /// Gmail Pub/Sub push notification channel
     pub gmail_push: Option<Arc<GmailPushChannel>>,
@@ -623,6 +631,35 @@ pub async fn run_gateway(
         })
         .map(Arc::from);
 
+    // Chatwoot channel (if configured)
+    let chatwoot_channel: Option<Arc<ChatwootChannel>> =
+        config.channels_config.chatwoot.as_ref().map(|cw_cfg| {
+            Arc::new(ChatwootChannel::new(
+                cw_cfg.base_url.clone(),
+                cw_cfg.bot_token.clone(),
+            ))
+        });
+    // Chatwoot webhook secret for HMAC signature verification
+    // Priority: environment variable > config file
+    let chatwoot_webhook_secret: Option<Arc<str>> =
+        std::env::var("ZEROCLAW_CHATWOOT_WEBHOOK_SECRET")
+            .ok()
+            .and_then(|secret| {
+                let secret = secret.trim();
+                (!secret.is_empty()).then(|| secret.to_owned())
+            })
+            .or_else(|| {
+                config.channels_config.chatwoot.as_ref().and_then(|cw_cfg| {
+                    cw_cfg
+                        .webhook_secret
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|secret| !secret.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+            })
+            .map(Arc::from);
+
     // WATI channel (if configured)
     let wati_channel: Option<Arc<WatiChannel>> =
         config.channels_config.wati.as_ref().map(|wati_cfg| {
@@ -781,6 +818,9 @@ pub async fn run_gateway(
     if linq_channel.is_some() {
         println!("  POST {pfx}/linq      — Linq message webhook (iMessage/RCS/SMS)");
     }
+    if chatwoot_channel.is_some() {
+        println!("  POST /chatwoot  — Chatwoot Agent Bot webhook");
+    }
     if wati_channel.is_some() {
         println!("  GET  {pfx}/wati      — WATI webhook verification");
         println!("  POST {pfx}/wati      — WATI message webhook");
@@ -852,6 +892,8 @@ pub async fn run_gateway(
         linq_signing_secret,
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
+        chatwoot: chatwoot_channel,
+        chatwoot_webhook_secret,
         wati: wati_channel,
         gmail_push: gmail_push_channel,
         observer: broadcast_observer,
@@ -913,6 +955,7 @@ pub async fn run_gateway(
         .route("/whatsapp", get(handle_whatsapp_verify))
         .route("/whatsapp", post(handle_whatsapp_message))
         .route("/linq", post(handle_linq_webhook))
+        .route("/chatwoot", post(handle_chatwoot_webhook))
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
@@ -1943,6 +1986,131 @@ async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> impl
 
     // Acknowledge the webhook
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// POST /chatwoot — incoming Chatwoot Agent Bot webhook
+async fn handle_chatwoot_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(ref chatwoot) = state.chatwoot else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Chatwoot not configured"})),
+        );
+    };
+
+    // Verify webhook signature if secret is configured
+    if let Some(ref webhook_secret) = state.chatwoot_webhook_secret {
+        let signature = headers
+            .get("X-Hub-Signature-256")
+            .or_else(|| headers.get("x-hub-signature-256"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_chatwoot_signature(webhook_secret, &body, signature) {
+            tracing::warn!("Chatwoot webhook signature verification failed");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Invalid webhook signature"})),
+            );
+        }
+    }
+
+    // Parse JSON body
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    // Parse messages from the webhook payload
+    let messages = chatwoot.parse_webhook_payload(&payload);
+
+    if messages.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
+    }
+
+    // Spawn async processing so we return 200 immediately.
+    // Chatwoot's webhook timeout is short (default 5s); LLM calls can take
+    // much longer, so we must not block the HTTP response.
+    let chatwoot = Arc::clone(chatwoot);
+    let state = state.clone();
+    tokio::spawn(async move {
+        for msg in &messages {
+            tracing::info!(
+                "Chatwoot message from {}: {}",
+                msg.sender,
+                truncate_with_ellipsis(&msg.content, 50)
+            );
+            let session_id = sender_session_id("chatwoot", msg);
+
+            // Auto-save to memory
+            if state.auto_save {
+                let key = chatwoot_memory_key(msg);
+                let _ = state
+                    .mem
+                    .store(
+                        &key,
+                        &msg.content,
+                        MemoryCategory::Conversation,
+                        Some(&session_id),
+                    )
+                    .await;
+            }
+
+            // Call the LLM
+            match run_gateway_chat_with_tools(&state, &msg.content, Some(&session_id)).await {
+                Ok(response) => {
+                    // Send reply via Chatwoot API
+                    if let Err(e) = chatwoot
+                        .send(&SendMessage::new(response, &msg.reply_target))
+                        .await
+                    {
+                        tracing::error!("Failed to send Chatwoot reply: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("LLM error for Chatwoot message: {e:#}");
+                    let _ = chatwoot
+                        .send(&SendMessage::new(
+                            "Sorry, I couldn't process your message right now.",
+                            &msg.reply_target,
+                        ))
+                        .await;
+                }
+            }
+        }
+    });
+
+    // Acknowledge the webhook immediately
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// Verify Chatwoot webhook HMAC-SHA256 signature.
+fn verify_chatwoot_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    // Chatwoot may send signature as "sha256=<hex>" or just "<hex>"
+    let provided_hex = signature_header
+        .strip_prefix("sha256=")
+        .unwrap_or(signature_header)
+        .trim();
+
+    if provided_hex.is_empty() {
+        return false;
+    }
+
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    let expected = hex::encode(mac.finalize().into_bytes());
+
+    crate::security::pairing::constant_time_eq(&expected, provided_hex)
 }
 
 /// POST /nextcloud-talk — incoming message webhook (Nextcloud Talk bot API)
